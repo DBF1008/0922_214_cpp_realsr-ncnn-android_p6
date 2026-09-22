@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+  <style>
+
+        .demo-area{
+        padding:20px;
+        display: flex;
+        align-items: stretch;
+        }
+
+        .demo-trigger {
+        width: 30%;
+        }
+
+        .detail {
+        position: relative;
+        width: 65%;
+        margin-left: 5%;
+        }
+  </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/drift-zoom@1.5.0/dist/Drift.min.js"></script>
+</head>
+
+<body>
+<section class="content">
+  <article class="demo-area">
+  <img class="demo-trigger" src="https://demos.imgix.net/wristwatch.jpg?w=200&ch=DPR&dpr=2&border=1,ddd" data-zoom="https://demos.imgix.net/wristwatch.jpg?w=1000&ch=DPR&dpr=2">
+  <div class="detail">
+   <section>
+      <ul>
+        <li>Hover over image</li>
+        <li>35 mm stainless steel case</li>
+        <li>Stainless link bracelet with buckle closure</li>
+        <li>Water resistant to 100m</li>
+      </ul>
+      <h4>$XX.XX <button>Add to Cart</button></h4>
+    </section>
+  </div>
+  </article>
+</section>
+  <script>
+    (function() {
+    var demoTrigger = document.querySelector('.demo-trigger');
+    var paneContainer = document.querySelector('.detail');
+
+    new Drift(demoTrigger, {
+    paneContainer: paneContainer,
+    inlinePane: false,
+    });
+    })();
+  </script>
+</body>
+
+</html>

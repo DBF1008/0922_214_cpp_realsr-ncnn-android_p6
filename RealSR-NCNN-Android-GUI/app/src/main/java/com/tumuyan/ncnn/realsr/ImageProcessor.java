@@ -1,0 +1,127 @@
+package com.tumuyan.ncnn.realsr;
+
+import android.util.Log;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.InterruptedIOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+/**
+ * 图像处理器类，负责管理后台任务和进程执行。
+ * 使用 ExecutorService 替代原始线程，提供更好的并发控制。
+ */
+public class ImageProcessor {
+    private static final String TAG = "ImageProcessor";
+    private final ExecutorService executorService;
+    private Process currentProcess;
+    private Future<?> currentTask;
+    private volatile boolean taskCancelled;
+
+    public interface ProcessCallback {
+        void onProgress(String line);
+        void onCompleted(String result, boolean success);
+        void onError(String error);
+    }
+
+    public ImageProcessor() {
+        // 使用单线程执行器，确保任务按顺序执行（如果需要并发可以改为 newFixedThreadPool）
+        this.executorService = Executors.newSingleThreadExecutor();
+    }
+
+    public void executeCommand(String command, String workingDir, ProcessCallback callback) {
+        cancelCurrentTask();
+        taskCancelled = false;
+
+        currentTask = executorService.submit(() -> {
+            runProcess(command, workingDir, callback);
+        });
+    }
+
+    private void runProcess(String command, String workingDir, ProcessCallback callback) {
+        StringBuilder resultBuilder = new StringBuilder();
+        boolean success = false;
+
+        try {
+            Log.d(TAG, "Executing command: " + command);
+            ProcessBuilder processBuilder = new ProcessBuilder("sh");
+            processBuilder.directory(new File(workingDir));
+            processBuilder.redirectErrorStream(true);
+            
+            synchronized (this) {
+                currentProcess = processBuilder.start();
+            }
+
+            OutputStream os = currentProcess.getOutputStream();
+            // workingDir 来自应用缓存目录（getCacheDir），参数来源可信
+            String setupCmd = "cd " + workingDir + "; chmod +x *ncnn 2>/dev/null; export LD_LIBRARY_PATH=" + workingDir + ";\n";
+            os.write(setupCmd.getBytes());
+            os.write((command + "\n").getBytes());
+            os.write("exit\n".getBytes());
+            os.flush();
+            os.close();
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(currentProcess.getInputStream()));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("Task interrupted");
+                }
+                // 过滤无用日志
+                if (line.contains("unused DT entry")) continue;
+                if (line.startsWith("CPU Group:")) continue;
+                if (line.startsWith("(last_midr")) continue;
+                if (line.startsWith("Error tunning info")) continue;
+                
+                Log.d(TAG, line);
+                callback.onProgress(line);
+                resultBuilder.append(line).append("\n");
+            }
+            
+            int exitCode = currentProcess.waitFor();
+            success = (exitCode == 0);
+            Log.d(TAG, "Process finished with exit code: " + exitCode);
+
+        } catch (InterruptedException e) {
+            Log.w(TAG, "Process interrupted");
+            callback.onError("Process interrupted");
+        } catch (InterruptedIOException e) {
+            Log.w(TAG, "Process stream closed by cancel, treating as normal cancellation");
+            callback.onError("Task cancelled");
+        } catch (Exception e) {
+            Log.e(TAG, "Error executing process", e);
+            callback.onError(e.getMessage());
+        } finally {
+            synchronized (this) {
+                if (currentProcess != null) {
+                    currentProcess.destroy();
+                    currentProcess = null;
+                }
+            }
+            if (!taskCancelled) {
+                callback.onCompleted(resultBuilder.toString(), success);
+            }
+        }
+    }
+
+    public void cancelCurrentTask() {
+        taskCancelled = true;
+        if (currentTask != null && !currentTask.isDone()) {
+            currentTask.cancel(true);
+        }
+        synchronized (this) {
+            if (currentProcess != null) {
+                currentProcess.destroy();
+                currentProcess = null;
+            }
+        }
+    }
+
+    public void shutdown() {
+        executorService.shutdownNow();
+    }
+}
