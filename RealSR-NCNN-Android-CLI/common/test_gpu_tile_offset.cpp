@@ -88,7 +88,6 @@ static int g_passed = 0;
 static void test_standard_tiles()
 {
     const int w = 800, h = 600, scale = 2, ch = 3, TY = 400;
-    const int yt = (h + TY - 1) / TY;  // 2
 
     // tile 0: rows 0-399 → output rows 0-799
     TileInfo t0 = compute_tile_info(0, h, w, scale, ch, TY);
@@ -111,7 +110,6 @@ static void test_standard_tiles()
 static void test_short_edge_tile()
 {
     const int w = 400, h = 500, scale = 2, ch = 3, TY = 400;
-    const int yt = (h + TY - 1) / TY;  // 2
 
     TileInfo t1 = compute_tile_info(1, h, w, scale, ch, TY);
     CHECK(t1.out_tile_y0 == 400,          "short y0");
@@ -161,7 +159,6 @@ static void test_exact_multiple()
 static void test_scale4_rgba()
 {
     const int w = 400, h = 450, scale = 4, ch = 4, TY = 400;
-    const int yt = (h + TY - 1) / TY;  // 2
 
     TileInfo t0 = compute_tile_info(0, h, w, scale, ch, TY);
     CHECK(t0.out_gpu_h == 1600,   "s4 t0 h");
@@ -198,7 +195,6 @@ static void test_many_small_tiles()
 static void test_odd_dimensions()
 {
     const int w = 401, h = 399, scale = 3, ch = 3, TY = 200;
-    const int yt = (h + TY - 1) / TY;  // 2
 
     TileInfo t0 = compute_tile_info(0, h, w, scale, ch, TY);
     CHECK(t0.fits, "odd t0 fits");
