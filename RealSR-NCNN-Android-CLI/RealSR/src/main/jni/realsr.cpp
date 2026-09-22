@@ -11,6 +11,8 @@
 #include "realsr_preproc_tta.comp.hex.h"
 #include "realsr_postproc_tta.comp.hex.h"
 
+#include "../../../../common/gpu_tile_download.h"
+
 RealSR::RealSR(int gpuid, bool _tta_mode, int num_threads)
 {
     vkdev = gpuid == -1 ? 0 : ncnn::get_gpu_device(gpuid);
@@ -580,41 +582,11 @@ int RealSR::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
             }
         }
 
-        // download
-        {
-            ncnn::Mat out;
-
-            if ((opt.use_fp16_storage || opt.use_fp16_packed) && opt.use_int8_storage)
-            {
-                int out_tile_y0 = std::max(yi * TILE_SIZE_Y, 0);
-                size_t offset = out_tile_y0 * scale * w * scale * channels;
-                out = ncnn::Mat(out_gpu.w, out_gpu.h, (unsigned char*)outimage.data + offset, (size_t)channels, 1, opt.blob_allocator);
-            }
-
-            cmd.record_clone(out_gpu, out, opt);
-
-            cmd.submit_and_wait();
-
-            if (!((opt.use_fp16_storage || opt.use_fp16_packed) && opt.use_int8_storage))
-            {
-                if (channels == 3)
-                {
-#if _WIN32
-                    out.to_pixels((unsigned char*)outimage.data + yi * scale * TILE_SIZE_Y * w * scale * channels, ncnn::Mat::PIXEL_RGB2BGR);
-#else
-                    out.to_pixels((unsigned char*)outimage.data + yi * scale * TILE_SIZE_Y * w * scale * channels, ncnn::Mat::PIXEL_RGB);
-#endif
-                }
-                if (channels == 4)
-                {
-#if _WIN32
-                    out.to_pixels((unsigned char*)outimage.data + yi * scale * TILE_SIZE_Y * w * scale * channels, ncnn::Mat::PIXEL_RGBA2BGRA);
-#else
-                    out.to_pixels((unsigned char*)outimage.data + yi * scale * TILE_SIZE_Y * w * scale * channels, ncnn::Mat::PIXEL_RGBA);
-#endif
-                }
-            }
-        }
+        // download — safe write-back via temporary CPU Mat
+        download_gpu_tile_to_output(
+            out_gpu, outimage, out_tile_y0, scale, w, channels,
+            ((opt.use_fp16_storage || opt.use_fp16_packed) && opt.use_int8_storage),
+            cmd, opt);
     }
 
     vkdev->reclaim_blob_allocator(blob_vkallocator);

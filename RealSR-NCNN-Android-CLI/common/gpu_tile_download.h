@@ -38,6 +38,9 @@
 #include <cstring>
 #include <cstddef>
 #include <algorithm>
+#include <vector>
+
+#include "tile_row_copy.h"
 
 // The caller is expected to have already included the ncnn headers
 // (mat.h, gpu.h / vulkan headers) so that ncnn::Mat, ncnn::VkMat,
@@ -88,6 +91,13 @@ static inline void download_gpu_tile_to_output(
     // Use the *actual* tile boundary (out_tile_y0), not a recomputed formula.
     const size_t dst_stride  = (size_t)w * scale * channels;          // bytes per output row
     const size_t dst_y_start = (size_t)out_tile_y0 * scale;           // first output row of this tile
+
+    // Clamp against the real output image height so a mismatched
+    // out_tile_y0 can never produce an out-of-bounds base pointer.
+    if (dst_y_start >= (size_t)outimage.h)
+        return;
+
+    const size_t dst_capacity = ((size_t)outimage.h - dst_y_start) * dst_stride;
     unsigned char* dst       = (unsigned char*)outimage.data
                              + dst_y_start * dst_stride;
 
@@ -96,37 +106,45 @@ static inline void download_gpu_tile_to_output(
     {
         // out_gpu was created with (size_t)channels elemsize / elempack=1,
         // so the downloaded data is already interleaved uint8 pixels.
-        // Copy row-by-row so that even if out.w / out.h disagree with the
+        // Bounds-safe row copy: even if out.w / out.h disagree with the
         // pre-allocated out_gpu dimensions (model output mismatch, edge
-        // tile, etc.) we never write past the end of a row.
-        const size_t row_bytes = (size_t)out.w * out.elemsize;
-        for (int row = 0; row < out.h; ++row)
-        {
-            std::memcpy(dst + (size_t)row * dst_stride,
-                        (const unsigned char*)out.data + (size_t)row * row_bytes,
-                        row_bytes);
-        }
+        // tile, etc.) we never write past the end of outimage.
+        const size_t src_row_bytes = (size_t)out.w * out.elemsize;
+        tile_row_copy(dst, dst_stride, dst_capacity,
+                      (const unsigned char*)out.data, src_row_bytes,
+                      src_row_bytes, (size_t)out.h);
     }
     else
     {
         // out_gpu was created with float32 storage (elemsize=4u).
         // to_pixels() converts planar float → interleaved uint8 and honours
         // the destination stride so edge-tile rows land at the right place.
-        if (channels == 3)
-        {
+        const int pixel_type =
 #if _WIN32
-            out.to_pixels(dst, ncnn::Mat::PIXEL_RGB2BGR,  dst_stride);
+            channels == 4 ? ncnn::Mat::PIXEL_RGBA2BGRA : ncnn::Mat::PIXEL_RGB2BGR;
 #else
-            out.to_pixels(dst, ncnn::Mat::PIXEL_RGB,      dst_stride);
+            channels == 4 ? ncnn::Mat::PIXEL_RGBA : ncnn::Mat::PIXEL_RGB;
 #endif
+
+        const size_t packed_row_bytes = (size_t)out.w * channels;
+        if (packed_row_bytes == dst_stride && (size_t)out.h * dst_stride <= dst_capacity)
+        {
+            // Fast path: dimensions match the output image exactly.
+            out.to_pixels(dst, pixel_type, (int)dst_stride);
         }
-        else if (channels == 4)
+        else
         {
-#if _WIN32
-            out.to_pixels(dst, ncnn::Mat::PIXEL_RGBA2BGRA, dst_stride);
-#else
-            out.to_pixels(dst, ncnn::Mat::PIXEL_RGBA,      dst_stride);
-#endif
+            // Mismatch path (edge tile with unexpected model output size):
+            // convert into a temporary tightly-packed buffer first, then
+            // copy with explicit bounds clamping.
+            std::vector<unsigned char> tmp(packed_row_bytes * (size_t)out.h);
+            if (!tmp.empty())
+            {
+                out.to_pixels(tmp.data(), pixel_type);
+                tile_row_copy(dst, dst_stride, dst_capacity,
+                              tmp.data(), packed_row_bytes,
+                              packed_row_bytes, (size_t)out.h);
+            }
         }
     }
 }

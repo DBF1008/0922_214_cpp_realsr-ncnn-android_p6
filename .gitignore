@@ -29,3 +29,5 @@ RealSR-NCNN-Android-CLI/*/src/main/jni/CMakeSettings.json
 /RealSR-NCNN-Android-CLI/assets/output
 /RealSR-NCNN-Android-CLI/assets/report
 RealSR-NCNN-Android-CLI/assets/Linux-x64/
+/RealSR-NCNN-Android-CLI/common/build_unit_tests
+/RealSR-NCNN-Android-CLI/common/test_gpu_tile_offset

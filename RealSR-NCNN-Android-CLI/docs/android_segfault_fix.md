@@ -43,10 +43,10 @@ Android GPU 在 FP16 模式下对非标准行数的外部指针 Mat 执行 `reco
 
 | 模块 | 模式1 (输入 tile 上传) | 模式2a (输出 tile 下载) | 状态 |
 |------|----------------------|------------------------|------|
-| `RealSR/src/main/jni/realsr.cpp` | 行 ~248 | 行 ~587 | ✅ 已修复 |
-| `Waifu2x/src/main/jni/waifu2x.cpp` | 行 ~185 | 行 ~470 | ⏳ 模式1已修复, 模式2a待修复 |
-| `SRMD/src/main/jni/srmd.cpp` | 行 ~235 | 行 ~553 | ⏳ 模式1已修复, 模式2a待修复 |
-| `RealCUGAN/src/main/jni/realcugan.cpp` | 行 321, 1417, 1704, 2329 (4处) | 行 725, 2125 (2处) | ⏳ 模式1已修复, 模式2a待修复 |
+| `RealSR/src/main/jni/realsr.cpp` | 行 ~248 | 行 ~585 | ✅ 已修复 |
+| `Waifu2x/src/main/jni/waifu2x.cpp` | 行 ~185 | 行 ~475 | ✅ 已修复 |
+| `SRMD/src/main/jni/srmd.cpp` | 行 ~235 | 行 ~558 | ✅ 已修复 |
+| `RealCUGAN/src/main/jni/realcugan.cpp` | 行 321, 1417, 1704, 2329 (4处) | 行 725, 2097 (2处) | ✅ 已修复 |
 
 ### 模式1: 输入 tile — 非标准尺寸使用 memcpy
 
@@ -75,20 +75,34 @@ if ((opt.use_fp16_storage || opt.use_fp16_packed) && opt.use_int8_storage)
 ### 模式2a: 输出 tile 下载 offset
 
 download 阶段同样使用外部指针 Mat + `record_clone`，非标准输出 tile 高度可能存在相同风险。
+四个后端现已统一改为 `common/gpu_tile_download.h` 中的
+`download_gpu_tile_to_output()` 安全实现：先下载到 ncnn 持有的临时 CPU Mat，
+再按实际 tile 边界 (`out_tile_y0`) 写回 `outimage`，写回过程经
+`common/tile_row_copy.h` 的 `tile_row_copy()` 做边界钳制，绝不越界。
 
 ```cpp
-// 修复前（固定公式，可能越界）
+// 修复前（外部指针 + 固定公式，边缘 tile 可能越界/错位）
 out = ncnn::Mat(out_gpu.w, out_gpu.h,
     (unsigned char*)outimage.data + yi * scale * TILE_SIZE_Y * w * scale * channels,
     (size_t)channels, 1);
 
-// 修复后（使用实际 tile 起始位置）
-int out_tile_y0 = std::max(yi * TILE_SIZE_Y, 0);
-size_t offset = out_tile_y0 * scale * w * scale * channels;
-out = ncnn::Mat(out_gpu.w, out_gpu.h,
-    (unsigned char*)outimage.data + offset,
-    (size_t)channels, 1, opt.blob_allocator);
+// 修复后（统一下载到临时 Mat，再按实际 tile 边界安全写回）
+download_gpu_tile_to_output(
+    out_gpu, outimage, out_tile_y0, scale, w, channels,
+    (opt.use_fp16_storage && opt.use_int8_storage),
+    cmd, opt);
 ```
+
+安全保证：
+- 不再为 `outimage` 构造外部指针 Mat，Android 上 `record_clone` 不会
+  直接写用户缓冲区；
+- 写回偏移使用调用方已算好的真实 tile 边界 `out_tile_y0`，而非固定公式；
+- `tile_row_copy()` 对行宽与行数按 `outimage` 剩余容量钳制，模型输出
+  尺寸与预期不一致时也不会越界写；
+- float 路径尺寸不匹配时先 `to_pixels` 到临时紧凑缓冲，再钳制拷贝。
+
+回归验证：`common/test_gpu_tile_offset.cpp`（偏移公式 + `tile_row_copy`
+钳制共 11 组用例），仓库根目录 `test.sh` 一键编译运行，支持 `--asan`。
 
 ### 模式2b: `to_pixels` 路径
 

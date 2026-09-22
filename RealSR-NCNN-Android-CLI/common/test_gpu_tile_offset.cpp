@@ -26,6 +26,8 @@
 #include <cstring>
 #include <cstddef>
 
+#include "tile_row_copy.h"
+
 // ---------------------------------------------------------------------------
 // Simulate the tile offset computation used by the *fixed* code.
 // ---------------------------------------------------------------------------
@@ -307,6 +309,151 @@ static void test_old_formula_danger()
 }
 
 // ---------------------------------------------------------------------------
+// tile_row_copy() clamping tests — the bounds-safe copy used by the fixed
+// download helper (gpu_tile_download.h).
+// ---------------------------------------------------------------------------
+
+// Normal case: full copy, exact fit.
+static void test_copy_exact_fit()
+{
+    const size_t stride = 12, rows = 4;
+    unsigned char dst[48];
+    unsigned char src[48];
+    for (size_t i = 0; i < sizeof(src); ++i) src[i] = (unsigned char)(i + 1);
+    std::memset(dst, 0, sizeof(dst));
+
+    size_t written = tile_row_copy(dst, stride, sizeof(dst), src, stride, stride, rows);
+    CHECK(written == rows, "copy exact: all rows written");
+    CHECK(std::memcmp(dst, src, sizeof(dst)) == 0, "copy exact: content matches");
+}
+
+// Strided destination: rows land at stride boundaries, padding untouched.
+static void test_copy_strided_dst()
+{
+    const size_t dst_stride = 16, row_bytes = 12, rows = 3;
+    unsigned char dst[48];
+    unsigned char src[36];
+    std::memset(dst, 0xEE, sizeof(dst));
+    for (size_t i = 0; i < sizeof(src); ++i) src[i] = (unsigned char)(i + 1);
+
+    size_t written = tile_row_copy(dst, dst_stride, sizeof(dst), src, row_bytes, row_bytes, rows);
+    CHECK(written == rows, "copy strided: all rows written");
+    for (size_t r = 0; r < rows; ++r)
+    {
+        CHECK(std::memcmp(dst + r * dst_stride, src + r * row_bytes, row_bytes) == 0,
+              "copy strided: row content");
+        // padding between rows must be untouched
+        for (size_t p = row_bytes; p < dst_stride; ++p)
+            CHECK(dst[r * dst_stride + p] == 0xEE, "copy strided: padding untouched");
+    }
+}
+
+// Source row wider than destination row (model output width mismatch):
+// copy must be clipped to dst_stride per row.
+static void test_copy_clips_wide_rows()
+{
+    const size_t dst_stride = 8, src_row = 12, rows = 2;
+    unsigned char dst[16];
+    unsigned char src[24];
+    std::memset(dst, 0, sizeof(dst));
+    for (size_t i = 0; i < sizeof(src); ++i) src[i] = (unsigned char)(i + 1);
+
+    size_t written = tile_row_copy(dst, dst_stride, sizeof(dst), src, src_row, src_row, rows);
+    CHECK(written == rows, "clip wide: all rows written");
+    // each dst row holds only the first dst_stride bytes of the src row
+    CHECK(std::memcmp(dst, src, dst_stride) == 0, "clip wide: row 0 clipped");
+    CHECK(std::memcmp(dst + dst_stride, src + src_row, dst_stride) == 0,
+          "clip wide: row 1 clipped");
+}
+
+// More rows than fit in the destination capacity: clipped, no overflow.
+static void test_copy_clips_row_count()
+{
+    const size_t dst_stride = 8;
+    unsigned char dst[24];   // room for exactly 3 rows
+    unsigned char src[64];   // 8 rows available
+    std::memset(dst, 0, sizeof(dst));
+    std::memset(src, 0xAB, sizeof(src));
+
+    size_t written = tile_row_copy(dst, dst_stride, sizeof(dst), src, dst_stride,
+                                   dst_stride, 8);
+    CHECK(written == 3, "clip rows: only 3 rows fit");
+    for (size_t i = 0; i < sizeof(dst); ++i)
+        CHECK(dst[i] == 0xAB, "clip rows: dst fully written");
+}
+
+// Zero-capacity destination: nothing written, no crash.
+static void test_copy_zero_capacity()
+{
+    unsigned char dst[8];
+    unsigned char src[8];
+    std::memset(dst, 0, sizeof(dst));
+    std::memset(src, 0xAB, sizeof(src));
+
+    size_t written = tile_row_copy(dst, 8, 0, src, 8, 8, 4);
+    CHECK(written == 0, "zero capacity: nothing written");
+    for (size_t i = 0; i < sizeof(dst); ++i)
+        CHECK(dst[i] == 0, "zero capacity: dst untouched");
+}
+
+// Degenerate inputs: null pointers / zero sizes are safe no-ops.
+static void test_copy_degenerate()
+{
+    unsigned char buf[8] = {0};
+    CHECK(tile_row_copy(0, 8, 8, buf, 8, 8, 1) == 0,   "null dst");
+    CHECK(tile_row_copy(buf, 8, 8, 0, 8, 8, 1) == 0,   "null src");
+    CHECK(tile_row_copy(buf, 0, 8, buf, 8, 8, 1) == 0, "zero stride");
+    CHECK(tile_row_copy(buf, 8, 8, buf, 8, 0, 1) == 0, "zero row bytes");
+    CHECK(tile_row_copy(buf, 8, 8, buf, 8, 8, 0) == 0, "zero rows");
+}
+
+// Simulated edge-tile download: tile row shorter than TILE_SIZE and a
+// source taller than the remaining output — combined end-to-end check
+// with the offset computation used by the fixed backends.
+static void test_copy_edge_tile_end_to_end()
+{
+    const int w = 100, h = 150, scale = 2, ch = 3, TY = 100;
+    const int yt = (h + TY - 1) / TY;  // 2
+
+    const size_t buf_size = (size_t)w * scale * h * scale * ch;
+    unsigned char* buf = new unsigned char[buf_size];
+    std::memset(buf, 0, buf_size);
+
+    for (int yi = 0; yi < yt; ++yi)
+    {
+        TileInfo t = compute_tile_info(yi, h, w, scale, ch, TY);
+
+        // Simulate a downloaded tile whose source is deliberately taller
+        // and wider than the destination region (the failure mode that
+        // motivated the fix).
+        const size_t src_stride = t.dst_stride + 64;
+        const size_t src_rows   = (size_t)t.out_gpu_h + 5;
+        unsigned char* src = new unsigned char[src_stride * src_rows];
+        std::memset(src, 0xCD, src_stride * src_rows);
+
+        unsigned char* dst = buf + t.dst_offset;
+        const size_t capacity = buf_size - t.dst_offset;
+
+        size_t written = tile_row_copy(dst, t.dst_stride, capacity,
+                                       src, src_stride, src_stride, src_rows);
+        // Safety contract: never write past the output buffer.  Rows are
+        // clipped only by the remaining buffer capacity, not by the
+        // nominal tile height (in the real flow out.h always matches the
+        // actual VkMat height, so no clipping occurs for valid models).
+        const size_t expected_rows = std::min(src_rows, capacity / t.dst_stride);
+        CHECK(written == expected_rows, "e2e: clipped to buffer capacity");
+
+        delete[] src;
+    }
+
+    // Every output byte must have been written exactly once (0xCD).
+    for (size_t i = 0; i < buf_size; ++i)
+        CHECK(buf[i] == 0xCD, "e2e: buffer fully written");
+
+    delete[] buf;
+}
+
+// ---------------------------------------------------------------------------
 
 int main()
 {
@@ -324,6 +471,13 @@ int main()
     test_height_one();
     test_tilesize_one();
     test_old_formula_danger();
+    test_copy_exact_fit();
+    test_copy_strided_dst();
+    test_copy_clips_wide_rows();
+    test_copy_clips_row_count();
+    test_copy_zero_capacity();
+    test_copy_degenerate();
+    test_copy_edge_tile_end_to_end();
 
     std::printf("\n%d / %d passed\n", g_passed, g_tests);
 
